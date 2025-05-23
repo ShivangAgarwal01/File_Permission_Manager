@@ -4,6 +4,7 @@
 #include <ctime>
 #include <cstring>
 #include <sstream>
+#include <iostream>
 
 using namespace std;
 
@@ -21,7 +22,48 @@ void logAction(const string &action) {
     }
 }
 
-// Run a command silently (without opening command prompt window)
+// Run command and capture output
+std::string runCommandAndCaptureOutput(const std::string& command) {
+    HANDLE hRead, hWrite;
+    SECURITY_ATTRIBUTES sa = { sizeof(SECURITY_ATTRIBUTES), NULL, TRUE };
+
+    if (!CreatePipe(&hRead, &hWrite, &sa, 0)) return "Error creating pipe";
+    if (!SetHandleInformation(hRead, HANDLE_FLAG_INHERIT, 0)) return "Error setting handle";
+
+    PROCESS_INFORMATION pi;
+    STARTUPINFOA si = { sizeof(STARTUPINFOA) };
+    si.dwFlags = STARTF_USESTDHANDLES | STARTF_USESHOWWINDOW;
+    si.hStdOutput = hWrite;
+    si.hStdError = hWrite;
+    si.wShowWindow = SW_HIDE;
+
+    std::string cmd = "cmd.exe /c " + command;
+    char* cmdline = &cmd[0];
+
+    if (!CreateProcessA(NULL, cmdline, NULL, NULL, TRUE, CREATE_NO_WINDOW, NULL, NULL, &si, &pi)) {
+        return "Failed to start process";
+    }
+
+    CloseHandle(hWrite);
+
+    char buffer[128];
+    DWORD bytesRead;
+    std::string output;
+
+    while (ReadFile(hRead, buffer, sizeof(buffer) - 1, &bytesRead, NULL) && bytesRead > 0) {
+        buffer[bytesRead] = '\0';
+        output += buffer;
+    }
+
+    WaitForSingleObject(pi.hProcess, INFINITE);
+    CloseHandle(pi.hProcess);
+    CloseHandle(pi.hThread);
+    CloseHandle(hRead);
+
+    return output;
+}
+
+// Run a command silently without showing the CMD window
 bool runCommandSilently(const string& command) {
     STARTUPINFOA si = { sizeof(STARTUPINFOA) };
     PROCESS_INFORMATION pi;
@@ -29,7 +71,7 @@ bool runCommandSilently(const string& command) {
     si.wShowWindow = SW_HIDE;
 
     string fullCmd = "cmd.exe /c " + command;
-    char* cmd = &fullCmd[0]; // must be writable
+    char* cmd = &fullCmd[0];
 
     BOOL success = CreateProcessA(NULL, cmd, NULL, NULL, FALSE, CREATE_NO_WINDOW, NULL, NULL, &si, &pi);
 
@@ -41,7 +83,6 @@ bool runCommandSilently(const string& command) {
     return true;
 }
 
-// Windows message callback
 LRESULT CALLBACK WindowProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
     char file[256], user[256], perm[16];
 
@@ -63,7 +104,7 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             CreateWindow("BUTTON", "Revert", WS_VISIBLE | WS_CHILD, 380, 120, 80, 30, hwnd, (HMENU)6, NULL, NULL);
             CreateWindow("BUTTON", "Exit", WS_VISIBLE | WS_CHILD, 470, 120, 80, 30, hwnd, (HMENU)5, NULL, NULL);
 
-            hOutput = CreateWindow("STATIC", "", WS_VISIBLE | WS_CHILD, 20, 170, 530, 180, hwnd, NULL, NULL, NULL);
+            hOutput = CreateWindow("STATIC", "", WS_VISIBLE | WS_CHILD | SS_LEFT, 20, 170, 530, 200, hwnd, NULL, NULL, NULL);
             break;
 
         case WM_COMMAND:
@@ -72,22 +113,24 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             GetWindowTextA(hPermission, perm, 16);
 
             switch (wParam) {
-                case 1:
-                    runCommandSilently("icacls \"" + string(file) + "\"");
+                case 1: { // View
+                    std::string result = runCommandAndCaptureOutput("icacls \"" + string(file) + "\"");
                     logAction("Viewed permissions for " + string(file));
-                    SetWindowTextA(hOutput, ("Viewed permissions for " + string(file)).c_str());
+                    SetWindowTextA(hOutput, result.c_str());
                     break;
-                case 2:
+                }
+                case 2: // Grant
                     runCommandSilently("icacls \"" + string(file) + "\" /grant " + string(user) + ":" + string(perm));
                     logAction("Granted " + string(perm) + " to " + string(user) + " for " + string(file));
                     SetWindowTextA(hOutput, ("Granted " + string(perm) + " to " + string(user)).c_str());
                     break;
-                case 3:
+                case 3: // Revoke
+                    runCommandSilently("icacls \"" + string(file) + "\" /inheritance:r");
                     runCommandSilently("icacls \"" + string(file) + "\" /remove " + string(user));
                     logAction("Revoked permissions from " + string(user) + " for " + string(file));
                     SetWindowTextA(hOutput, ("Revoked permissions from " + string(user)).c_str());
                     break;
-                case 4:
+                case 4: // Enforce Read-only
                     runCommandSilently("icacls \"" + string(file) + "\" /inheritance:r");
                     runCommandSilently("icacls \"" + string(file) + "\" /grant Everyone:R");
                     runCommandSilently("icacls \"" + string(file) + "\" /remove %username%");
@@ -96,7 +139,7 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                     logAction("Enforced strict Read-Only on " + string(file));
                     SetWindowTextA(hOutput, ("Strict Read-only enforced on " + string(file)).c_str());
                     break;
-                case 6:
+                case 6: // Revert full access
                     runCommandSilently("icacls \"" + string(file) + "\" /grant %username%:F");
                     logAction("Reverted to Full Control for owner on " + string(file));
                     SetWindowTextA(hOutput, ("Permissions reverted for " + string(file)).c_str());
@@ -111,7 +154,6 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             PostQuitMessage(0);
             break;
     }
-
     return DefWindowProc(hwnd, msg, wParam, lParam);
 }
 
